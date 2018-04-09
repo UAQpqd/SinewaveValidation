@@ -12,3 +12,7 @@ add_subdirectory(DSPFilters/shared/DSPFilters)
 add_executable(MethodsComparison methodsComparison.cpp ProposedMethodology.cpp ProposedMethodology.hpp)
 target_include_directories(MethodsComparison PUBLIC minusDarwin synthSignal DSPFilters/shared/DSPFilters ${OpenCL_INCLUDE_DIR} ${Boost_INCLUDE_DIR})
 target_link_libraries(MethodsComparison PUBLIC MinusDarwin SynthSignal DSPFilters OpenCL::OpenCL ${Boost_LIBRARIES} -lpthread -lm)
+
+add_executable(FilterTestbench FilterTestbench.cpp)
+target_include_directories(FilterTestbench PUBLIC minusDarwin synthSignal DSPFilters/shared/DSPFilters ${OpenCL_INCLUDE_DIR} ${Boost_INCLUDE_DIR})
+target_link_libraries(FilterTestbench PUBLIC MinusDarwin SynthSignal DSPFilters OpenCL::OpenCL ${Boost_LIBRARIES} -lpthread -lm)

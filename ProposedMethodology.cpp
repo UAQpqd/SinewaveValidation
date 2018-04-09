@@ -38,7 +38,7 @@ void DEBlock::run(unsigned int sps,
     kernel->set_arg(2,dScores);
     kernel->set_arg(3,(unsigned int)dX.size());
     // Estimate A by the sumOfSquares
-    float omega = (inOmegaMax+inOmegaMin)/2.0f;
+    /*float omega = (inOmegaMax+inOmegaMin)/2.0f;
     float T = (float)dSignal.size()/(float)sps;
     double delta = 1.0/(double)sps;
     double integrationApprox =
@@ -46,9 +46,9 @@ void DEBlock::run(unsigned int sps,
                             [&delta](double accum, double val) -> double {
                                 accum = accum + pow(delta*val,2.0);
                             });
-    float a = sqrt((float)integrationApprox*2.0f/T);
+    float a = sqrt((float)integrationApprox*2.0f/T);*/
 
-    kernel->set_arg(10,a); //TODO: Check
+    kernel->set_arg(10,inA); //TODO: Check
     auto evaluatePopulationLambda =
             [this,/*&queue, &kernel, */&dSignal, &dScores, &dX, &sumOfSquares](
                     MinusDarwin::Scores &scores,
@@ -69,9 +69,38 @@ void DEBlock::run(unsigned int sps,
                 bc::copy(dScores.begin(),dScores.end(),scores.begin(),*queue);
             };
     MinusDarwin::Solver solver(config,evaluatePopulationLambda);
-    auto agent = solver.run(true);
-    outEstOmega = agent.at(0);
-    outEstPhi = agent.at(1);
+    auto agent = solver.run(false);
+    outEstOmega = inOmegaMin+(inOmegaMax-inOmegaMin)*agent.at(0);
+    outEstPhi = 2.0f*M_PI*agent.at(1);
+    std::cout << "Frequency:" << outEstOmega/(2.0f*M_PI) << " "
+              << "Phi:" << outEstPhi/(2.0f*M_PI) << std::endl;
+}
+
+void RMSBlock::run(unsigned int sps) {
+    // For each half cycle RMS is calculated
+    double T = (double)inSignal->size()/(double)sps;
+    double freq = (double)inOmega/(2.0*M_PI);
+    double delta = 1.0/(freq*2.0);
+    double hcCountDbl = T*freq;
+    unsigned int hcCount = (unsigned int)floor(hcCountDbl);
+    for(unsigned int hc = 0; hc<hcCount; hc++)
+    {
+        unsigned int hcStart =
+                floor(delta*(double)hc*(double)inSignal->size()/T);
+        unsigned int hcEnd =
+                floor(delta*(double)(hc+1)*(double)inSignal->size()/T);
+
+        if(hcEnd>=inSignal->size()) break;
+        float sum = std::accumulate(
+                inSignal->begin()+(int)hcStart,
+                inSignal->begin()+(int)hcEnd,
+                0.0f,
+                [](float accum, float val) -> float {
+                    accum = accum + pow(val,2.0f);
+                });
+        float N = (float)(hcEnd-hcStart);
+        outRMS.push_back(sqrt(sum/N));
+    }
 }
 
 ProposedMethodology::ProposedMethodology(
@@ -84,20 +113,16 @@ ProposedMethodology::ProposedMethodology(
         freq0star(t_freq0star),
         freqSearchAbsTol(t_freqSearchAbsTol) {
     // Get all filters initialized
-    fp1.setup(3,sps,freq0star+freqSearchAbsTol,1);
-    fp2.setup(3,sps,freq0star-freqSearchAbsTol,1);
-    /*fp1.setup(3,sps,freq0star+freqSearchAbsTol);
-    fp2.setup(3,sps,freq0star-freqSearchAbsTol);*/
+    fp1.setup(flickerFilterOrder,sps,freq0star-freqSearchAbsTol/*,1*/);
+    fp2.setup(fundamentalFilterOrder,sps,freq0star,2.0f*freqSearchAbsTol/*,1*/);
     harmonicFactors = std::vector<float>(
             t_harmonicFactors.begin(),
             t_harmonicFactors.end());
     for(auto &factor : harmonicFactors) {
-        Dsp::SimpleFilter<Dsp::ChebyshevII::BandPass<3>,1> filter;
-        filter.setup(3,sps,factor*freq0star,2.0f*freqSearchAbsTol,1);
-        harmonicFilters.push_back(filter);
+
     }
     // Initialize RMS blocks
-    harmonicsRMSBlocks.resize(harmonicFactors.size());
+    //harmonicsRMSBlocks.resize(harmonicFactors.size());
 }
 
 void ProposedMethodology::run(const std::vector<float> *rp) {
@@ -119,31 +144,87 @@ void ProposedMethodology::run(const std::vector<float> *rp) {
     kernel.set_arg(9,(unsigned int)sps);
     writeCsvFile(rp,sps,"rp.csv");
     // Filter rp by the low pass filter
-    std::vector<float> rplow(rp->begin(),rp->end());
+    std::vector<float> rp0(rp->begin(),rp->end());
     float *channels[1];
-    channels[0] = &rplow.at(0);
-    fp1.process((int)rplow.size(),channels);
-    // Filter rp0 by the high pass filter
-    std::vector<float> rp1(rplow.begin(),rplow.end());
+    channels[0] = &rp0.at(0);
+    fp1.process((int)rp0.size(),channels);
+    writeCsvFile(&rp0,sps,"rp0.csv");
+    std::vector<float> rp1(rp->begin(),rp->end());
     channels[0] = &rp1.at(0);
     fp2.process((int)rp1.size(),channels);
     writeCsvFile(&rp1,sps,"rp1.csv");
-    std::vector<float> rp0(rp1.size());
-    for(size_t p = 0;p<rp0.size();p++)
-        rp0.at(p) = rplow.at(p) - rp1.at(p);
-    writeCsvFile(&rp0,sps,"rp0.csv");
+    // Search from 0.05Hz to fundamental frequency lower bound
     flickerDEBlock = new DEBlock(
             &rp0,
             0.05f,
             (freq0star-freqSearchAbsTol)*2.0f*(float)M_PI,
+            1.0f,
             &queue,
             &kernel);
+    std::cout << "Flicker ";
     flickerDEBlock->run(sps, ctx);
+    // Search on the fundamental frequency range
     fundamentalDEBlock = new DEBlock(
             &rp1,
             (freq0star-freqSearchAbsTol)*2.0f*(float)M_PI,
             (freq0star+freqSearchAbsTol)*2.0f*(float)M_PI,
+            127.0f*sqrt(2.0f),
             &queue,
             &kernel);
+    std::cout << "Fundamental ";
     fundamentalDEBlock->run(sps, ctx);
+    /* Once flicker and fundamental parameters are had
+     * the RMS of each half cycle of them must be
+     * calculated as for harmonic frequencies too */
+    flickerRmsBlock = new RMSBlock(
+            &rp0,
+            flickerDEBlock->outEstOmega
+    );
+    flickerRmsBlock->run(sps);
+    float flickerMeanRms = std::accumulate(
+            flickerRmsBlock->outRMS.begin(),
+            flickerRmsBlock->outRMS.end(),
+            0.0f,std::plus<float>()
+    );
+    flickerMeanRms /= (float)flickerRmsBlock->outRMS.size();
+    std::cout << "Flicker mean RMS: " << flickerMeanRms << std::endl;
+    fundamentalRmsBlock = new RMSBlock(
+            rp,
+            fundamentalDEBlock->outEstOmega
+    );
+    fundamentalRmsBlock->run(sps);
+
+
+    float fundamentalMeanRms = std::accumulate(
+            fundamentalRmsBlock->outRMS.begin(),
+            fundamentalRmsBlock->outRMS.end(),
+            0.0f,std::plus<float>()
+    );
+    fundamentalMeanRms /= (float)fundamentalRmsBlock->outRMS.size();
+    std::cout << "Fundamental mean RMS: " << fundamentalMeanRms << std::endl;
+
+    for(auto factor : harmonicFactors) {
+        std::vector<float> harmonicSignal(rp->begin(),rp->end());
+        Dsp::SimpleFilter<Dsp::Butterworth::BandPass<harmonicFilterOrder>,1> filter;
+        filter.setup(
+                harmonicFilterOrder,sps,
+                factor*fundamentalDEBlock->outEstOmega/(2.0f*M_PI),
+                2.0f*freqSearchAbsTol/*,1*/);
+        channels[0] = &harmonicSignal.at(0);
+        filter.process((int)harmonicSignal.size(),channels);
+        auto harmonicRmsBlock = new RMSBlock(
+                &harmonicSignal,
+                fundamentalDEBlock->outEstOmega
+        );
+        harmonicRmsBlock->run(sps);
+
+        float harmonicMeanRms = std::accumulate(
+                harmonicRmsBlock->outRMS.begin(),
+                harmonicRmsBlock->outRMS.end(),
+                0.0f,std::plus<float>()
+        );
+        harmonicMeanRms /= (float)harmonicRmsBlock->outRMS.size();
+        std::cout << "Harmonic " << factor << " mean RMS: " << harmonicMeanRms << std::endl;
+
+    }
 }
